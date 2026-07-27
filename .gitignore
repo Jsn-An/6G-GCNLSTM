@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+.DS_Store
+.pytest_cache/
+.mypy_cache/
+ruff_cache/
