@@ -162,7 +162,7 @@ def plot_predictions(
     axes = axes.flatten() if n > 1 else [axes]
 
     for idx, i in enumerate(plot_indices):
-        i = int(i)
+        i = int(i.item()) if hasattr(i, "item") else int(i)
         ax = axes[idx]
         t = np.arange(len(y_true[i]))
         ax.plot(t, y_true[i], "b-", linewidth=1.2, alpha=0.7, label="Ground Truth")
