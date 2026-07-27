@@ -82,7 +82,7 @@ class NodeState:
     current_load: float = 0.0
     max_capacity: float = 1.0
     task_queue: deque[Task] = field(default_factory=deque)
-    processing_rate: float = 0.2         # 每时间步处理能力
+    processing_rate: float = 0.08         # 每时间步处理能力（降低以制造资源竞争）
     reserved_load: float = 0.0           # 已预留负载
     sla_violations: int = 0              # SLA 违规计数
 
@@ -106,8 +106,8 @@ def generate_tasks(
     num_nodes: int,
     predicted_loads: np.ndarray,
     num_timesteps: int,
-    task_rate: float = 0.3,              # 每时间步每节点生成任务的概率
-    base_load: float = 0.05,             # 基础任务负载
+    task_rate: float = 0.5,              # 每时间步每节点生成任务的概率（提高以制造资源竞争）
+    base_load: float = 0.06,             # 基础任务负载
     seed: int = 42,
 ) -> list[list[Task]]:
     """生成时间序列任务流。
