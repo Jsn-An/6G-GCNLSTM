@@ -45,8 +45,10 @@ class GCNLSTM(nn.Module):
         self.output_dim = output_dim
 
         # ---- 空间编码 (GCN) ----
-        self.gcn1 = GCNConv(in_features, gcn_hidden)
-        self.gcn2 = GCNConv(gcn_hidden, gcn_hidden)
+        # add_self_loops=False：因为 build_graph.py 中已经手动加了自环，
+        # 若让 PyG 再加一次，在 mini-batch 手动拼接场景下会触发 CUDA device-side assert
+        self.gcn1 = GCNConv(in_features, gcn_hidden, add_self_loops=False)
+        self.gcn2 = GCNConv(gcn_hidden, gcn_hidden, add_self_loops=False)
         self.gcn_dropout = nn.Dropout(dropout)
 
         # ---- 时序编码 (LSTM) ----
@@ -180,8 +182,8 @@ class GCNLSTMSimple(nn.Module):
         super().__init__()
 
         # ---- 空间编码 ----
-        self.gcn1 = GCNConv(in_features, gcn_hidden)
-        self.gcn2 = GCNConv(gcn_hidden, gcn_hidden)
+        self.gcn1 = GCNConv(in_features, gcn_hidden, add_self_loops=False)
+        self.gcn2 = GCNConv(gcn_hidden, gcn_hidden, add_self_loops=False)
         self.gcn_dropout = nn.Dropout(dropout)
 
         # ---- 时序编码 ----
