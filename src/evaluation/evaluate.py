@@ -252,12 +252,14 @@ def plot_per_node_metrics(
 
     # 按 cell_type 排序再按 RMSE 排序
     type_order = {"macro": 0, "micro": 1, "pico": 2}
-    rmse_values = np.array([metrics_per_node[cid]["RMSE"] for cid in cell_ids])
+    rmse_values = [metrics_per_node[cid]["RMSE"] for cid in cell_ids]
     types = [cell_type_map.get(cid, "unknown") for cid in cell_ids]
-    sort_key = [(type_order.get(t, 99), rmse_values[i]) for i, t in enumerate(types)]
-    order = np.argsort(sort_key)
+    # 用 Python sorted 排序，避免 np.argsort 对元组的兼容问题
+    scored = [(type_order.get(types[i], 99), rmse_values[i], i) for i in range(len(cell_ids))]
+    scored.sort()
+    order = [s[2] for s in scored]
     sorted_ids = [cell_ids[i] for i in order]
-    sorted_rmse = rmse_values[order]
+    sorted_rmse = np.array([rmse_values[i] for i in order])
     sorted_types = [types[i] for i in order]
 
     type_colors = {"macro": "#E74C3C", "micro": "#3498DB", "pico": "#2ECC71"}
