@@ -54,16 +54,17 @@ class GCNLayer(nn.Module):
             edge_weight = edge_weight.view(-1)
 
         # 计算节点度 D[i] = Σ_j A[i,j]
-        # 使用 scatter_add_ 而非 PyG 的 degree()，避免 PyG 内部 CUDA 问题
-        row = edge_index[0]
-        deg = torch.zeros(num_nodes, device=device, dtype=x.dtype).scatter_add_(0, row, edge_weight)
+        # 用稀疏矩阵乘法替代 scatter_add_（CUDA 兼容性更好）
+        ones = torch.ones(num_nodes, 1, device=device, dtype=x.dtype)
+        A = torch.sparse_coo_tensor(edge_index, edge_weight, (num_nodes, num_nodes)).coalesce()
+        deg = torch.sparse.mm(A, ones).squeeze(-1)  # (N,)
 
         # D^{-1/2}，处理孤立节点（度为 0 时设置 0）
         deg_inv_sqrt = deg.pow(-0.5)
         deg_inv_sqrt.masked_fill_(deg_inv_sqrt == float('inf'), 0)
 
         # 对称归一化边权重：w_norm[i,j] = d_i^{-1/2} · w[i,j] · d_j^{-1/2}
-        col = edge_index[1]
+        row, col = edge_index[0], edge_index[1]
         norm_weight = deg_inv_sqrt[row] * edge_weight * deg_inv_sqrt[col]
 
         # 构建稀疏归一化邻接矩阵 Â_norm
