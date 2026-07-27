@@ -151,9 +151,10 @@ def plot_predictions(
     # 按 cell_type 顺序排：macro → micro → pico，同类内部按 RMSE 升序
     type_order = {"macro": 0, "micro": 1, "pico": 2}
     rmse_per_cell = np.sqrt(np.mean((y_true - y_pred) ** 2, axis=1))
-    sort_key = [(type_order.get(cell_type_map.get(cid, ""), 99), rmse_per_cell[i])
-                for i, cid in enumerate(cell_ids)]
-    plot_indices = np.argsort(sort_key)[:num_cells_to_plot]
+    scored = [(type_order.get(cell_type_map.get(cid, ""), 99), float(rmse_per_cell[i]), i)
+              for i, cid in enumerate(cell_ids)]
+    scored.sort()
+    plot_indices = [s[2] for s in scored[:num_cells_to_plot]]
 
     n = min(num_cells_to_plot, len(cell_ids))
     cols = min(4, n)
@@ -162,7 +163,6 @@ def plot_predictions(
     axes = axes.flatten() if n > 1 else [axes]
 
     for idx, i in enumerate(plot_indices):
-        i = int(i.item()) if hasattr(i, "item") else int(i)
         ax = axes[idx]
         t = np.arange(len(y_true[i]))
         ax.plot(t, y_true[i], "b-", linewidth=1.2, alpha=0.7, label="Ground Truth")
