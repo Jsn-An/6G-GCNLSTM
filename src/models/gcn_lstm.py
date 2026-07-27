@@ -40,9 +40,16 @@ class GCNLSTM(nn.Module):
     ):
         super().__init__()
 
+        self.in_features = in_features
+        self.gcn_hidden = gcn_hidden
+        self.lstm_hidden = lstm_hidden
+        self.lstm_layers = lstm_layers
+        self.output_dim = output_dim
+
         # ---- 空间编码 (GCN) ----
         # add_self_loops=False：build_graph.py 已手动加自环到 edge_index 中
         self.gcn1 = GCNConv(in_features, gcn_hidden, add_self_loops=False)
+        self.gcn2 = GCNConv(gcn_hidden, gcn_hidden, add_self_loops=False)
         self.gcn2 = GCNConv(gcn_hidden, gcn_hidden, add_self_loops=False)
         self.gcn_dropout = nn.Dropout(dropout)
 
