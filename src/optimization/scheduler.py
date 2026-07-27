@@ -218,19 +218,18 @@ def _adaptive_schedule(
     """自适应调度：动态计算每个任务的紧急度分数。
 
     分数 = α * urgency + β * priority + γ * efficiency
-    - urgency: 基于 slack = deadline - current_time - 预期处理时间
+    - urgency: 基于该任务自身 deadline 窗口的紧迫程度
     - priority: 任务优先级
     - efficiency: 任务负载越小越高效
     """
-    current_time = pending_tasks[0].arrival_time if pending_tasks else 0
 
     def score(task: Task) -> float:
-        # 紧急度
-        if task.deadline is not None:
-            slack = max(task.deadline - current_time, 0)
-            urgency = 1.0 / (slack + 1.0)
+        # 紧急度：基于任务自身的 deadline - arrival 时间窗口
+        total_window = (task.deadline - task.arrival_time) if task.deadline is not None else 20
+        if total_window > 0:
+            urgency = 1.0 / (total_window + 1.0)
         else:
-            urgency = 0.2
+            urgency = 0.5
 
         # 优先级归一化
         pri_norm = task.priority.value / 3.0
@@ -265,7 +264,7 @@ def find_best_node_for_task(
     num_nodes = len(node_states)
 
     # 检查源节点
-    if (node_states[src].current_load + node_states[src].reserved_load + task.load
+    if (node_states[src].reserved_load + task.load
             < node_states[src].max_capacity * (1 - config.reservation_ratio)):
         return src
 
@@ -281,7 +280,7 @@ def find_best_node_for_task(
 
     for node in candidates:
         ns = node_states[node]
-        available = ns.max_capacity * (1 - config.reservation_ratio) - ns.current_load - ns.reserved_load
+        available = ns.max_capacity * (1 - config.reservation_ratio) - ns.reserved_load
         if available < task.load:
             continue
 
@@ -455,7 +454,7 @@ def run_scheduler(
 
         # ---- Step 5: 处理节点队列 ----
         for ns in node_states:
-            processed = 0
+            processed = 0.0
             max_process = ns.processing_rate
             while ns.task_queue and processed < max_process:
                 task = ns.task_queue.popleft()
@@ -466,8 +465,7 @@ def run_scheduler(
                 completed_tasks += 1
                 completion_times.append(t - task.arrival_time)
                 waiting_times.append(t - task.arrival_time - task.load)
-                ns.current_load = max(0, ns.current_load - remaining)
-                ns.reserved_load = max(0, ns.reserved_load - task.load)
+                ns.reserved_load = max(0.0, ns.reserved_load - task.load)
                 processed += remaining
 
                 # SLA 检查
@@ -475,7 +473,8 @@ def run_scheduler(
                     ns.sla_violations += 1
                     sla_violations += 1
 
-            ns.current_load = min(ns.current_load + ns.reserved_load, ns.max_capacity)
+            # 当前负载 = 剩余未处理任务的负载总和（不重复加）
+            ns.current_load = ns.reserved_load
 
         # 记录负载
         load_history.append(np.array([ns.current_load for ns in node_states]))

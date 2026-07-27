@@ -60,7 +60,8 @@ class OffloadingConfig:
     # ---- 目标选择 ----
     max_targets_per_source: int = 3           # 每个源节点最多选择的卸载目标数
     max_hop_distance: int = 2                 # 最大跳数（基于图拓扑）
-    target_load_threshold: float = 0.50       # 仅当目标预测负载低于此值时才接收任务
+    target_load_threshold: float = 0.40       # 仅当目标预测负载低于此值时才接收任务
+    target_safety_margin: float = 0.15        # 目标接收任务后不应超过 (threshold + margin)
 
     # ---- 策略参数 ----
     strategy: OffloadingStrategy = OffloadingStrategy.HYBRID
@@ -253,6 +254,22 @@ def _find_candidate_targets(
     return candidates[: cfg.max_targets_per_source]
 
 
+def _safe_offload_amount(
+    source_load: float,
+    target_load: float,
+    excess: float,
+    cfg: OffloadingConfig,
+) -> float:
+    """计算安全的卸载量，确保目标节点接收后不超过安全上限。
+
+    安全上限 = target_load_threshold + target_safety_margin
+    """
+    safe_cap = cfg.target_load_threshold + cfg.target_safety_margin
+    target_available = max(0.0, safe_cap - target_load)
+    src_max = min(excess, source_load * cfg.max_offload_ratio)
+    return min(cfg.task_load_unit, src_max, target_available)
+
+
 def _greedy_offload(
     source: int,
     predicted_loads: np.ndarray,
@@ -275,8 +292,7 @@ def _greedy_offload(
     for target in candidates_sorted:
         if offload_remaining <= 0:
             break
-        available = cfg.target_load_threshold - predicted_loads[target]
-        amount = min(cfg.task_load_unit, offload_remaining, available)
+        amount = _safe_offload_amount(src_load, predicted_loads[target], offload_remaining, cfg)
         if amount <= 0:
             continue
 
@@ -287,6 +303,7 @@ def _greedy_offload(
             strategy_used="greedy",
         ))
         offload_remaining -= amount
+        predicted_loads[target] += amount
 
     return decisions
 
@@ -310,10 +327,7 @@ def _load_balance_offload(
     per_target = offload_total / len(candidates)
 
     for target in candidates:
-        available = cfg.target_load_threshold - predicted_loads[target]
-        amount = min(per_target, available)
-        # 至少一个任务单元
-        amount = max(amount, cfg.task_load_unit) if amount >= cfg.task_load_unit else 0.0
+        amount = _safe_offload_amount(src_load, predicted_loads[target], per_target, cfg)
         if amount <= 0:
             continue
         decisions.append(OffloadingDecision(
@@ -322,6 +336,7 @@ def _load_balance_offload(
             offload_amount=float(amount),
             strategy_used="load_balance",
         ))
+        predicted_loads[target] += amount
 
     return decisions
 
@@ -365,8 +380,7 @@ def _latency_aware_offload(
     for target, cost in candidate_costs:
         if offload_remaining <= 0:
             break
-        available = cfg.target_load_threshold - predicted_loads[target]
-        amount = min(cfg.task_load_unit, offload_remaining, available)
+        amount = _safe_offload_amount(src_load, predicted_loads[target], offload_remaining, cfg)
         if amount <= 0:
             continue
         decisions.append(OffloadingDecision(
@@ -377,6 +391,7 @@ def _latency_aware_offload(
             cost=cost,
         ))
         offload_remaining -= amount
+        predicted_loads[target] += amount
 
     return decisions
 
@@ -431,8 +446,7 @@ def _hybrid_offload(
     for target in sorted_targets:
         if offload_remaining <= 0:
             break
-        available = cfg.target_load_threshold - predicted_loads[target]
-        amount = min(cfg.task_load_unit, offload_remaining, available)
+        amount = _safe_offload_amount(src_load, predicted_loads[target], offload_remaining, cfg)
         if amount <= 0:
             continue
         decisions.append(OffloadingDecision(
@@ -443,6 +457,7 @@ def _hybrid_offload(
             cost=1.0 - scores[target],
         ))
         offload_remaining -= amount
+        predicted_loads[target] += amount
 
     return decisions
 
@@ -507,10 +522,10 @@ def run_offloading(
         else:
             decisions = []
 
-        # 更新负载状态（按优先级处理，更拥塞的先处理）
+        # 各策略函数已就地更新 load_after（目标节点负载递增）
+        # 此处仅更新源节点负载
         for d in decisions:
-            load_after[d.source_node] -= d.offload_amount
-            load_after[d.target_node] += d.offload_amount
+            load_after[d.source_node] = max(0.0, load_after[d.source_node] - d.offload_amount)
         all_decisions.extend(decisions)
 
     # 4. 卸载后拥塞检测
