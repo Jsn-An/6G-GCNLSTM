@@ -77,51 +77,50 @@ class GCNLSTM(nn.Module):
         """
         Args:
             x:            节点特征序列 (batch_size, seq_len, num_nodes, in_features)
-            edge_index:   图边索引 (2, num_edges)
+            edge_index:   图边索引 (2, num_edges) — 原始图，不拼接
             edge_weight:  边权重 (num_edges,)，可选
 
         Returns:
             y_pred:  预测值 (batch_size, num_nodes, output_dim)
+
+        策略：不在 GCN 层做 mini-batch 拼接（避免 PyG 内部 CUDA scatter 越界），
+        而是对 batch 中每个样本独立跑 GCN，再在 LSTM 层正常做 batch。
         """
         batch_size, seq_len, num_nodes, _ = x.shape
 
-        # ---- Step 1: 逐时间步做 GCN 空间编码 ----
-        gcn_outputs = []
-        for t in range(seq_len):
-            # 取出第 t 步所有 batch 的特征： (batch_size * num_nodes, in_features)
-            x_t = x[:, t, :, :].reshape(batch_size * num_nodes, -1)
+        # ---- Step 1: 对 batch 中每个样本，逐时间步独立跑 GCN ----
+        all_samples = []  # 收集每个样本的结果
 
-            # GCN 消息传递需要知道 batch 内的节点属于哪个图
-            # 构造 batch 向量，每个 batch 样本有自己的图（边相同，节点特征不同）
-            batch_vec = torch.arange(batch_size, device=x.device).repeat_interleave(num_nodes)
-            # 对边索引进行偏移以适配 batching，同时复制边权重
-            edge_index_batch, edge_weight_batch = self._batch_edge_index(
-                edge_index, edge_weight, num_nodes, batch_size, x.device
-            )
+        for b in range(batch_size):
+            x_b = x[b]  # (seq_len, num_nodes, in_features)
 
-            h = self.gcn1(x_t, edge_index_batch, edge_weight_batch)
-            h = torch.relu(h)
-            h = self.gcn_dropout(h)
-            h = self.gcn2(h, edge_index_batch, edge_weight_batch)
-            h = torch.relu(h)
+            gcn_per_step = []
+            for t in range(seq_len):
+                x_t = x_b[t]  # (num_nodes, in_features)
 
-            # 恢复形状: (batch_size, num_nodes, gcn_hidden)
-            h = h.view(batch_size, num_nodes, self.gcn_hidden)
-            gcn_outputs.append(h)
+                h = self.gcn1(x_t, edge_index, edge_weight)
+                h = torch.relu(h)
+                h = self.gcn_dropout(h)
+                h = self.gcn2(h, edge_index, edge_weight)
+                h = torch.relu(h)
 
-        # 堆叠: (batch_size, seq_len, num_nodes, gcn_hidden)
-        gcn_seq = torch.stack(gcn_outputs, dim=1)
+                gcn_per_step.append(h)  # (num_nodes, gcn_hidden)
+
+            # (seq_len, num_nodes, gcn_hidden)
+            gcn_b = torch.stack(gcn_per_step, dim=0)
+            all_samples.append(gcn_b)
+
+        # 堆叠所有样本: (batch_size, seq_len, num_nodes, gcn_hidden)
+        gcn_seq = torch.stack(all_samples, dim=0)
 
         # ---- Step 2: LSTM 时序建模 ----
-        # 将 num_nodes 合并到 batch 维度:
-        # (batch_size * num_nodes, seq_len, gcn_hidden)
+        # 将 (batch, num_nodes) 合并: (batch_size * num_nodes, seq_len, gcn_hidden)
         gcn_seq = gcn_seq.permute(0, 2, 1, 3).reshape(
             batch_size * num_nodes, seq_len, self.gcn_hidden
         )
 
-        lstm_out, (h_n, c_n) = self.lstm(gcn_seq)
-        # 取最后一个时间步的输出: (batch_size * num_nodes, lstm_hidden)
-        last_out = lstm_out[:, -1, :]
+        lstm_out, _ = self.lstm(gcn_seq)
+        last_out = lstm_out[:, -1, :]  # (batch_size * num_nodes, lstm_hidden)
 
         # ---- Step 3: 输出预测 ----
         out = self.fc(last_out)  # (batch_size * num_nodes, output_dim)
@@ -129,30 +128,6 @@ class GCNLSTM(nn.Module):
 
         return out
 
-    @staticmethod
-    def _batch_edge_index(
-        edge_index: torch.Tensor,
-        edge_weight: torch.Tensor | None,
-        num_nodes: int,
-        batch_size: int,
-        device: torch.device,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """将单个图的 edge_index 和 edge_weight 复制并偏移，用于 mini-batch 训练。
-
-        PyG 的 batching 机制：每个样本的节点索引需要偏移 i * num_nodes，
-        同时边权重也需要对应复制，否则 GCNConv 内部的 gcn_norm 会报错。
-        """
-        edge_list = []
-        weight_list = []
-        for i in range(batch_size):
-            offset = i * num_nodes
-            edge_list.append(edge_index + offset)
-            if edge_weight is not None:
-                weight_list.append(edge_weight)
-
-        ei_batch = torch.cat(edge_list, dim=1).to(device)
-        ew_batch = torch.cat(weight_list, dim=0).to(device) if weight_list else None
-        return ei_batch, ew_batch
 
 
 class GCNLSTMSimple(nn.Module):
