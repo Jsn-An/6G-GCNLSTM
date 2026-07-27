@@ -59,7 +59,7 @@ class EvalConfig:
     lstm_layers = 2
     dropout = 0.3
 
-    device = "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 cfg = EvalConfig()

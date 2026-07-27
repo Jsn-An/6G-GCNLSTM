@@ -71,7 +71,7 @@ class Config:
 
     # ---- 训练 ----
     batch_size = 8     # 每个 batch 包含多个全图时间窗口
-    epochs = 100
+    epochs = 200
     lr = 1e-3
     weight_decay = 1e-5
     patience = 15
