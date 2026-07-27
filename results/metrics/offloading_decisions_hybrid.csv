@@ -1,0 +1,13 @@
+source,target,amount,strategy
+15,12,0.05,hybrid
+15,13,0.05,hybrid
+15,10,0.028467369079589883,hybrid
+17,10,0.05,hybrid
+17,14,0.05,hybrid
+17,13,0.018464159965515176,hybrid
+19,13,0.05,hybrid
+19,10,0.05,hybrid
+19,11,0.014508795738220254,hybrid
+16,11,0.05,hybrid
+16,14,0.05,hybrid
+18,11,0.038113522529602095,hybrid
