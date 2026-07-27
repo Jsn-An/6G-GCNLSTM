@@ -74,14 +74,14 @@ class GCNLSTM(nn.Module):
         对 batch 中每个样本逐时间步独立做 GCN（不拼接图，避免 PyG 内部
         add_remaining_self_loops 的 CUDA 问题），然后在 LSTM 层正常做 batch。
         """
-        batch_size, seq_len, num_nodes, _ = x.shape
+        batch_size, num_nodes, seq_len, _ = x.shape
 
         all_samples = []
         for b in range(batch_size):
-            x_b = x[b]
+            x_b = x[b]  # (num_nodes, seq_len, F)
             gcn_per_step = []
             for t in range(seq_len):
-                x_t = x_b[t]
+                x_t = x_b[:, t, :]  # (num_nodes, F)
                 h = self.gcn1(x_t, edge_index, edge_weight)
                 h = torch.relu(h)
                 h = self.gcn_dropout(h)
