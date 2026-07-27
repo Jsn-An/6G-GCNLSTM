@@ -2,12 +2,11 @@
 GCN+LSTM 时空预测模型
 
 架构：
-- 每个时间步使用 GCN 提取小区之间的空间依赖
+- 每个时间步使用 GCNConv (PyG) 提取小区之间的空间依赖
 - 将 GCN 输出的时间序列输入 LSTM 捕获时序演化
 - 全连接层输出下一时刻的拥塞预测
 
-GCN 层使用纯 PyTorch 算子实现（torch.sparse + scatter_add_），
-不依赖 PyG 的 GCNConv，彻底避开其内部 CUDA scatter 兼容性问题。
+需要 PyTorch >= 2.0 + PyG >= 2.3，旧版 PyTorch 存在 CUDA scatter 内核 bug。
 
 输入: 过去 T 个时间步的节点特征 (batch, seq_len, num_nodes, in_features)
 输出: 未来时刻各节点的拥塞预测 (batch, num_nodes, output_dim)
@@ -15,77 +14,11 @@ GCN 层使用纯 PyTorch 算子实现（torch.sparse + scatter_add_），
 
 import torch
 import torch.nn as nn
+from torch_geometric.nn import GCNConv
 
-
-# ============================================================================
-# 自定义 GCN 层（纯 PyTorch 实现，完全绕过 PyG）
-# ============================================================================
-
-class GCNLayer(nn.Module):
-    """单层图卷积，使用纯 PyTorch 稀疏矩阵运算实现。
-
-    公式：H' = σ(D^{-1/2} Â D^{-1/2} H W)
-
-    其中 Â = A + I（已由 build_graph.py 在 edge_index 中预加自环）。
-    本层不再额外添加自环。
-
-    Args:
-        in_dim:  输入特征维度
-        out_dim: 输出特征维度
-    """
-
-    def __init__(self, in_dim: int, out_dim: int):
-        super().__init__()
-        self.W = nn.Linear(in_dim, out_dim, bias=False)
-
-    def forward(
-        self,
-        x: torch.Tensor,          # (N, in_dim)
-        edge_index: torch.Tensor, # (2, E)
-        edge_weight: torch.Tensor | None = None,  # (E,) or (E, 1)
-    ) -> torch.Tensor:
-        num_nodes = x.size(0)
-        device = x.device
-
-        if edge_weight is None:
-            edge_weight = torch.ones(edge_index.size(1), device=device, dtype=x.dtype)
-        else:
-            # 防御：确保 edge_weight 是 1D，兼容 PyG Data 存储为 (E, 1) 的情况
-            edge_weight = edge_weight.view(-1)
-
-        # 计算节点度 D[i] = Σ_j A[i,j]
-        # 用稀疏矩阵乘法替代 scatter_add_（CUDA 兼容性更好）
-        ones = torch.ones(num_nodes, 1, device=device, dtype=x.dtype)
-        A = torch.sparse_coo_tensor(edge_index, edge_weight, (num_nodes, num_nodes)).coalesce()
-        deg = torch.sparse.mm(A, ones).squeeze(-1)  # (N,)
-
-        # D^{-1/2}，处理孤立节点（度为 0 时设置 0）
-        deg_inv_sqrt = deg.pow(-0.5)
-        deg_inv_sqrt.masked_fill_(deg_inv_sqrt == float('inf'), 0)
-
-        # 对称归一化边权重：w_norm[i,j] = d_i^{-1/2} · w[i,j] · d_j^{-1/2}
-        row, col = edge_index[0], edge_index[1]
-        norm_weight = deg_inv_sqrt[row] * edge_weight * deg_inv_sqrt[col]
-
-        # 构建稀疏归一化邻接矩阵 Â_norm
-        A_norm = torch.sparse_coo_tensor(
-            edge_index, norm_weight, (num_nodes, num_nodes)
-        ).coalesce()
-
-        # 稀疏矩阵乘法：Â_norm @ (X @ W)
-        out = torch.sparse.mm(A_norm, self.W(x))
-        return out
-
-
-# ============================================================================
-# GCN + LSTM 模型
-# ============================================================================
 
 class GCNLSTM(nn.Module):
     """GCN+LSTM 时空预测模型。
-
-    使用自定义 GCNLayer（纯 PyTorch 稀疏运算）替代 PyG 的 GCNConv，
-    彻底绕过 PyG 内部的 CUDA scatter 兼容性问题。
 
     Args:
         in_features:       每个节点的输入特征维度
@@ -107,15 +40,10 @@ class GCNLSTM(nn.Module):
     ):
         super().__init__()
 
-        self.in_features = in_features
-        self.gcn_hidden = gcn_hidden
-        self.lstm_hidden = lstm_hidden
-        self.lstm_layers = lstm_layers
-        self.output_dim = output_dim
-
         # ---- 空间编码 (GCN) ----
-        self.gcn1 = GCNLayer(in_features, gcn_hidden)
-        self.gcn2 = GCNLayer(gcn_hidden, gcn_hidden)
+        # add_self_loops=False：build_graph.py 已手动加自环到 edge_index 中
+        self.gcn1 = GCNConv(in_features, gcn_hidden, add_self_loops=False)
+        self.gcn2 = GCNConv(gcn_hidden, gcn_hidden, add_self_loops=False)
         self.gcn_dropout = nn.Dropout(dropout)
 
         # ---- 时序编码 (LSTM) ----
@@ -143,33 +71,35 @@ class GCNLSTM(nn.Module):
     ) -> torch.Tensor:
         """前向传播。
 
-        对 batch 中每个样本逐时间步独立做 GCN（不拼接图），
-        然后在 LSTM 层正常做 batch。
+        对 batch 中每个样本逐时间步独立做 GCN（不拼接图，避免 PyG 内部
+        add_remaining_self_loops 的 CUDA 问题），然后在 LSTM 层正常做 batch。
         """
         batch_size, seq_len, num_nodes, _ = x.shape
 
         all_samples = []
         for b in range(batch_size):
-            x_b = x[b]  # (seq_len, num_nodes, F)
+            x_b = x[b]
             gcn_per_step = []
             for t in range(seq_len):
-                x_t = x_b[t]  # (num_nodes, F)
+                x_t = x_b[t]
                 h = self.gcn1(x_t, edge_index, edge_weight)
                 h = torch.relu(h)
                 h = self.gcn_dropout(h)
                 h = self.gcn2(h, edge_index, edge_weight)
                 h = torch.relu(h)
                 gcn_per_step.append(h)
-            gcn_b = torch.stack(gcn_per_step, dim=0)  # (seq_len, num_nodes, H)
+            gcn_b = torch.stack(gcn_per_step, dim=0)
             all_samples.append(gcn_b)
 
-        gcn_seq = torch.stack(all_samples, dim=0)  # (batch, seq_len, N, H)
+        gcn_seq = torch.stack(all_samples, dim=0)
 
-        # 将 (batch, N) 合并: (batch*N, seq_len, H)
-        gcn_seq = gcn_seq.permute(0, 2, 1, 3).reshape(batch_size * num_nodes, seq_len, self.gcn_hidden)
+        # (batch*N, seq_len, H)
+        gcn_seq = gcn_seq.permute(0, 2, 1, 3).reshape(
+            batch_size * num_nodes, seq_len, self.gcn_hidden
+        )
 
         lstm_out, _ = self.lstm(gcn_seq)
-        last_out = lstm_out[:, -1, :]  # (batch*N, lstm_hidden)
+        last_out = lstm_out[:, -1, :]
 
-        out = self.fc(last_out)  # (batch*N, output_dim)
+        out = self.fc(last_out)
         return out.view(batch_size, num_nodes, self.output_dim)
