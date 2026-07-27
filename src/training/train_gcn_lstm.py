@@ -173,16 +173,18 @@ def load_data():
     g = torch.load(cfg.graph_pt, map_location="cpu", weights_only=False)
 
     # ---- 图节点数与数据节点数对齐 ----
-    # 图数据可能是用不同规模的数据集生成的，需要裁剪边索引
-    if g.num_nodes != num_cells:
-        print(f"\n  ⚠ 图节点数 ({g.num_nodes}) ≠ 数据小区数 ({num_cells})，自动裁剪边索引...")
+    # 防御性检查：确保 edge_index 中所有索引 < num_cells
+    ei_max = int(g.edge_index.max().item())
+    if ei_max >= num_cells:
+        print(f"\n  ⚠ edge_index 中最大索引为 {ei_max}，但数据只有 {num_cells} 个小区，自动裁剪...")
         mask = (g.edge_index[0] < num_cells) & (g.edge_index[1] < num_cells)
+        n_before = g.edge_index.shape[1]
         g.edge_index = g.edge_index[:, mask]
         if g.edge_attr is not None:
             g.edge_attr = g.edge_attr[mask]
-        print(f"  裁剪后: {g.edge_index.shape[1]} 边")
+        print(f"  裁剪前: {n_before} 边 → 裁剪后: {g.edge_index.shape[1]} 边")
 
-    print(f"  图结构: {g.num_nodes} 节点, {g.edge_index.shape[1]} 边\n")
+    print(f"  图结构: {num_cells} 节点, {g.edge_index.shape[1]} 边\n")
 
     return train_ds, val_ds, test_ds, g.edge_index, g.edge_attr, num_cells, num_features
 
