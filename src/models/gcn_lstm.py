@@ -78,18 +78,19 @@ class GCNLSTM(nn.Module):
         Args:
             x:            节点特征序列 (batch_size, seq_len, num_nodes, in_features)
             edge_index:   图边索引 (2, num_edges) — 原始图，不拼接
-            edge_weight:  边权重 (num_edges,)，可选
+            edge_weight:  边权重 (num_edges,)，当前不使用（GCNConv 默认权重 1.0）
 
         Returns:
             y_pred:  预测值 (batch_size, num_nodes, output_dim)
 
-        策略：不在 GCN 层做 mini-batch 拼接（避免 PyG 内部 CUDA scatter 越界），
-        而是对 batch 中每个样本独立跑 GCN，再在 LSTM 层正常做 batch。
+        策略：不在 GCN 层做 mini-batch 拼接，对 batch 中每个样本独立跑 GCN，
+        再在 LSTM 层正常做 batch。
+        NOTE: edge_weight 传 None 以避免 CUDA scatter 边权重维度兼容问题。
         """
         batch_size, seq_len, num_nodes, _ = x.shape
 
         # ---- Step 1: 对 batch 中每个样本，逐时间步独立跑 GCN ----
-        all_samples = []  # 收集每个样本的结果
+        all_samples = []
 
         for b in range(batch_size):
             x_b = x[b]  # (seq_len, num_nodes, in_features)
@@ -98,19 +99,17 @@ class GCNLSTM(nn.Module):
             for t in range(seq_len):
                 x_t = x_b[t]  # (num_nodes, in_features)
 
-                h = self.gcn1(x_t, edge_index, edge_weight)
+                h = self.gcn1(x_t, edge_index, None)
                 h = torch.relu(h)
                 h = self.gcn_dropout(h)
-                h = self.gcn2(h, edge_index, edge_weight)
+                h = self.gcn2(h, edge_index, None)
                 h = torch.relu(h)
 
-                gcn_per_step.append(h)  # (num_nodes, gcn_hidden)
+                gcn_per_step.append(h)
 
-            # (seq_len, num_nodes, gcn_hidden)
             gcn_b = torch.stack(gcn_per_step, dim=0)
             all_samples.append(gcn_b)
 
-        # 堆叠所有样本: (batch_size, seq_len, num_nodes, gcn_hidden)
         gcn_seq = torch.stack(all_samples, dim=0)
 
         # ---- Step 2: LSTM 时序建模 ----
