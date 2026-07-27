@@ -472,10 +472,13 @@ def run_pipeline(strategy_name: str = "hybrid", timesteps: int = 30, verbose: bo
     print("=" * 60)
 
     sched_cfg = SchedulingConfig(policy=SchedulingPolicy.ADAPTIVE)
+    # 使用独立副本，避免被前面 compare_scheduling_policies 污染任务状态
+    import copy
+    cloned_stream = [[copy.deepcopy(t) for t in ts] for ts in task_stream]
     sched_result = run_scheduler(
         predicted_seq, edge_index, edge_weight,
         offload_config=base_cfg, sched_config=sched_cfg,
-        task_stream=task_stream, verbose=verbose,
+        task_stream=cloned_stream, verbose=verbose,
     )
 
     print("\n" + sched_result.summary())

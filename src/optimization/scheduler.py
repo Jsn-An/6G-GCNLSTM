@@ -18,6 +18,7 @@
 
 import os
 import sys
+import copy
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
@@ -403,15 +404,30 @@ def run_scheduler(
         total_tasks += len(new_tasks)
 
         # ---- Step 2: 任务卸载决策 ----
-        # 对当前时间步的预测负载执行卸载
+        # 基于当前预测负载执行卸载，将拥塞源节点的 pending 任务
+        # 优先分配至卸载目标节点（而非留在源节点排队）
         offload_result = run_offloading(pred_t, ei, edge_weight, offload_config)
-        # 将卸载决策映射到待处理任务
-        unassigned_sources = set(d.source_node for d in offload_result.decisions)
+        offload_targets: dict[int, list[int]] = {}
+        for d in offload_result.decisions:
+            offload_targets.setdefault(d.source_node, []).append(d.target_node)
+
         for task in global_pending:
-            if task.status == "pending" and task.source_node in unassigned_sources:
-                task.assigned_node = task.source_node
-                task.status = "assigned"
-                offloaded_count += 1
+            if task.status != "pending" or task.source_node not in offload_targets:
+                continue
+            assigned = False
+            for target in offload_targets[task.source_node]:
+                ns = node_states[target]
+                if ns.reserved_load + task.load < ns.max_capacity * (1 - sched_config.reservation_ratio):
+                    task.assigned_node = target
+                    task.status = "assigned"
+                    ns.reserved_load += task.load
+                    ns.task_queue.append(task)
+                    offloaded_count += 1
+                    assigned = True
+                    break
+            if not assigned:
+                # 无法卸载，留到 Step 4 正常分配
+                pass
 
         # ---- Step 3: 任务排序 ----
         pending = [t for t in global_pending if t.status == "pending"]
@@ -528,9 +544,11 @@ def compare_scheduling_policies(
     rows = []
     for policy in policies:
         sched_cfg = SchedulingConfig(policy=policy)
+        # 每个策略使用独立的任务副本，避免前一个策略修改任务状态
+        cloned = [[copy.deepcopy(t) for t in ts] for ts in task_stream] if task_stream else None
         result = run_scheduler(
             predicted_loads_seq, edge_index, edge_weight,
-            sched_config=sched_cfg, task_stream=task_stream,
+            sched_config=sched_cfg, task_stream=cloned,
             verbose=False,
         )
         rows.append({
