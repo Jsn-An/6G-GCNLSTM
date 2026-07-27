@@ -154,8 +154,11 @@ def generate_tasks(
                     stype = rng.choice(slice_types)
                     # 任务负载与节点当前预测负载相关
                     load = base_load * (1 + rng.random())
-                    # 截止时间
-                    deadline = t + rng.integers(3, 21)  # 3-20 步内完成
+                    # 截止时间（高优先级任务 deadline 更紧）
+                    if stype in ("URLLC", "HC"):
+                        deadline = t + rng.integers(1, 4)   # 1-3 步内必须完成
+                    else:
+                        deadline = t + rng.integers(2, 8)   # 2-7 步内完成
                     task = Task(
                         task_id=task_id,
                         source_node=node,

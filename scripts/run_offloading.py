@@ -502,6 +502,13 @@ def _print_final_summary(
     sched_result: SchedulingResult,
 ):
     """打印最终总结报告。"""
+    # 最佳卸载策略：拥塞减少最多
+    best_offload = offload_cmp.sort_values("congestion_reduction_pct", ascending=False).iloc[0]
+    # 最佳调度策略：完成率最高，SLA 违规最少为 tiebreaker
+    best_sched = sched_cmp.sort_values(
+        ["completion_rate", "sla_violations"], ascending=[False, True]
+    ).iloc[0]
+
     print(f"""
 ╔══════════════════════════════════════════════════════════════════════╗
 ║                    最终总结 (Final Summary)                         ║
@@ -509,17 +516,14 @@ def _print_final_summary(
 ║                                                                      ║
 ║  📊 任务卸载优化 (Task Offloading)                                   ║
 ║  ─────────────────────────────────                                  ║
-║  最佳策略: {offload_cmp.iloc[0]['strategy']:<20s}                                   ║
-║  拥塞减少: {offload_cmp.iloc[0]['congestion_reduction_pct']:.1f}%                                         ║
-║  公平指数提升: {offload_cmp.iloc[0]['jain_fairness_after'] - offload_cmp.iloc[0]['jain_fairness_before']:.4f}                                  ║
-║  最大负载降低: {offload_cmp.iloc[0]['max_load_before']:.3f} → {offload_cmp.iloc[0]['max_load_after']:.3f}                              ║
+║  最佳策略: {best_offload['strategy']:<20s} (拥塞减少 {best_offload['congestion_reduction_pct']:.1f}%)                   ║
+║  公平指数: {best_offload['jain_fairness_before']:.4f} → {best_offload['jain_fairness_after']:.4f}                         ║
+║  最大负载: {best_offload['max_load_before']:.3f} → {best_offload['max_load_after']:.3f}                               ║
 ║                                                                      ║
 ║  📋 智能调度 (Intelligent Scheduling)                                ║
 ║  ────────────────────────────────                                   ║
-║  最佳策略: {sched_cmp.iloc[0]['policy']:<20s}                                  ║
-║  任务完成率: {sched_cmp.iloc[0]['completion_rate']*100:.1f}%                                        ║
-║  任务卸载数: {sched_cmp.iloc[0]['offloaded']}                                                    ║
-║  SLA 违规: {sched_cmp.iloc[0]['sla_violations']}                                                      ║
+║  最佳策略: {best_sched['policy']:<20s} (完成率 {best_sched['completion_rate']*100:.1f}%)                  ║
+║  平均延迟: {best_sched['avg_completion_time']:.2f} steps  |  SLA 违规: {best_sched['sla_violations']}                               ║
 ║                                                                      ║
 ╚══════════════════════════════════════════════════════════════════════╝
 """)
