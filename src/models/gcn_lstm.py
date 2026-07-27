@@ -92,13 +92,15 @@ class GCNLSTM(nn.Module):
             # GCN 消息传递需要知道 batch 内的节点属于哪个图
             # 构造 batch 向量，每个 batch 样本有自己的图（边相同，节点特征不同）
             batch_vec = torch.arange(batch_size, device=x.device).repeat_interleave(num_nodes)
-            # 对边索引进行偏移以适配 batching
-            edge_index_batch = self._batch_edge_index(edge_index, num_nodes, batch_size, x.device)
+            # 对边索引进行偏移以适配 batching，同时复制边权重
+            edge_index_batch, edge_weight_batch = self._batch_edge_index(
+                edge_index, edge_weight, num_nodes, batch_size, x.device
+            )
 
-            h = self.gcn1(x_t, edge_index_batch, edge_weight)
+            h = self.gcn1(x_t, edge_index_batch, edge_weight_batch)
             h = torch.relu(h)
             h = self.gcn_dropout(h)
-            h = self.gcn2(h, edge_index_batch, edge_weight)
+            h = self.gcn2(h, edge_index_batch, edge_weight_batch)
             h = torch.relu(h)
 
             # 恢复形状: (batch_size, num_nodes, gcn_hidden)
@@ -128,19 +130,27 @@ class GCNLSTM(nn.Module):
     @staticmethod
     def _batch_edge_index(
         edge_index: torch.Tensor,
+        edge_weight: torch.Tensor | None,
         num_nodes: int,
         batch_size: int,
         device: torch.device,
-    ) -> torch.Tensor:
-        """将单个图的 edge_index 复制并偏移，用于 mini-batch 训练。
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """将单个图的 edge_index 和 edge_weight 复制并偏移，用于 mini-batch 训练。
 
-        PyG 的 batching 机制：每个样本的节点索引需要偏移 i * num_nodes。
+        PyG 的 batching 机制：每个样本的节点索引需要偏移 i * num_nodes，
+        同时边权重也需要对应复制，否则 GCNConv 内部的 gcn_norm 会报错。
         """
         edge_list = []
+        weight_list = []
         for i in range(batch_size):
             offset = i * num_nodes
             edge_list.append(edge_index + offset)
-        return torch.cat(edge_list, dim=1).to(device)
+            if edge_weight is not None:
+                weight_list.append(edge_weight)
+
+        ei_batch = torch.cat(edge_list, dim=1).to(device)
+        ew_batch = torch.cat(weight_list, dim=0).to(device) if weight_list else None
+        return ei_batch, ew_batch
 
 
 class GCNLSTMSimple(nn.Module):
