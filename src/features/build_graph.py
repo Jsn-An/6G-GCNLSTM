@@ -202,6 +202,22 @@ def apply_threshold(
     else:
         np.fill_diagonal(adj_matrix, 0.0)
 
+    # ---- 兜底：确保没有孤立节点 ----
+    # 有些基站可能跟谁都不够"像"，导致度为0。
+    # 对 GCN 来说，孤立节点没法聚合邻居信息，等于废了。
+    # 解决方案：给度为0的节点，强制连到它相关性最高的那个邻居（哪怕低于阈值）。
+    num_cells = adj_matrix.shape[0]
+    for i in range(num_cells):
+        row = adj_matrix[i].copy()
+        row[i] = 0.0  # 排除自环
+        if (row > 0).sum() == 0:
+            # 从原始相关性矩阵中找最强的邻居
+            best_j = int(np.argmax(corr_matrix[i]))
+            adj_matrix[i, best_j] = corr_matrix[i, best_j]
+            adj_matrix[best_j, i] = corr_matrix[i, best_j]
+            print(f"  ⚠ 节点 {i} 孤立，强制连到节点 {best_j} "
+                  f"(相关性={corr_matrix[i, best_j]:.3f})")
+
     return adj_matrix
 
 
@@ -408,19 +424,34 @@ def build_pyg_data(
 # ============================================================================
 
 def plot_correlation_heatmap(
-    corr_matrix: np.ndarray, cell_ids: np.ndarray, output_dir: str
+    corr_matrix: np.ndarray,
+    cell_ids: np.ndarray,
+    output_dir: str,
+    gamma: float = 0.4,
 ) -> None:
     """绘制相关性矩阵热力图。
+
+    使用 PowerNorm 非线性拉伸颜色映射，让高相关区（0.7-0.95）
+    的颜色差异更明显，避免人眼看过去全是差不多的一坨红。
 
     Args:
         corr_matrix: 相关性矩阵。
         cell_ids: 小区 ID 标签。
         output_dir: 图片输出目录。
+        gamma: PowerNorm 的 gamma 值，<1 时拉伸高值区，越小越夸张（默认 0.4）。
     """
     ensure_dir(output_dir)
 
+    # ---- 关键修改：非线性颜色映射 ----
+    # 原来 vmin=0, vmax=1 + 线性映射 → 相关性都挤在 0.6-0.95，颜色拉不开
+    # 现在：用实际数据范围 + PowerNorm(gamma<1)，高值区被"放大"
+    non_diag = corr_matrix[~np.eye(len(cell_ids), dtype=bool)]
+    vmin = float(np.min(non_diag))
+    vmax = float(np.max(non_diag))
+    norm = mcolors.PowerNorm(gamma=gamma, vmin=vmin, vmax=vmax)
+
     fig, ax = plt.subplots(figsize=(10, 8))
-    im = ax.imshow(corr_matrix, cmap="YlOrRd", vmin=0, vmax=1, aspect="equal")
+    im = ax.imshow(corr_matrix, cmap="YlOrRd", norm=norm, aspect="equal")
 
     # 设置刻度
     n = len(cell_ids)
@@ -429,14 +460,14 @@ def plot_correlation_heatmap(
     ax.set_xticklabels(cell_ids, rotation=45, ha="right", fontsize=8)
     ax.set_yticklabels(cell_ids, fontsize=8)
 
-    # 颜色条
+    # 颜色条（ticks 显示真实的相关性值，而不是 gamma 变换后的值）
     cbar = plt.colorbar(im, ax=ax, shrink=0.85)
-    cbar.set_label("Average |Correlation|", fontsize=11)
+    cbar.set_label(f"Average |Correlation|  (gamma={gamma})", fontsize=11)
 
     ax.set_title(
         "5G Cell KPI Correlation Matrix\n"
-        f"({n} cells × {len(KPI_COLUMNS)} KPIs averaged)",
-        fontsize=13,
+        f"({n} cells × {len(KPI_COLUMNS)} KPIs averaged, PowerNorm γ={gamma})",
+        fontsize=12,
         fontweight="bold",
     )
 
@@ -444,7 +475,7 @@ def plot_correlation_heatmap(
     path = os.path.join(output_dir, "correlation_heatmap.png")
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"  相关性热力图: {path}")
+    print(f"  相关性热力图: {path}  (vmin={vmin:.3f}, vmax={vmax:.3f}, gamma={gamma})")
 
 
 def plot_graph_topology(
@@ -510,14 +541,26 @@ def plot_graph_topology(
                 ax=ax,
             )
 
-    # 绘制边（粗细按权重）
+    # 绘制边（粗细按权重，非线性拉伸让强弱关系更分明）
     edges = list(G.edges(data=True))
     if edges:
-        weights = [d["weight"] * 2.5 for (_, _, d) in edges]
+        raw_weights = np.array([d["weight"] for (_, _, d) in edges])
+        # 用平方拉伸：权重 0.8 → 1.6粗细，权重 0.4 → 0.4粗细，差别更大
+        stretched = raw_weights ** 2
+        # 映射到 1~6 的线宽范围
+        if stretched.max() > stretched.min():
+            widths = 1.0 + 5.0 * (stretched - stretched.min()) / (stretched.max() - stretched.min())
+        else:
+            widths = np.full_like(stretched, 2.0)
+        # 按权重排序，粗线画在最上面（后画），避免粗线被细线盖住
+        order = np.argsort(raw_weights)
+        sorted_edges = [edges[i] for i in order]
+        sorted_widths = widths[order]
         nx.draw_networkx_edges(
             G, pos,
-            width=weights,
-            alpha=0.4,
+            edgelist=[(u, v) for (u, v, _) in sorted_edges],
+            width=sorted_widths.tolist(),
+            alpha=0.7,
             edge_color="#555555",
             ax=ax,
         )
@@ -543,37 +586,82 @@ def plot_graph_topology(
     print(f"  网络拓扑图: {path}")
 
 
-def plot_degree_distribution(adj_matrix: np.ndarray, output_dir: str) -> None:
-    """绘制节点度分布直方图。
+def plot_degree_distribution(
+    adj_matrix: np.ndarray,
+    cell_ids: np.ndarray,
+    df: pd.DataFrame,
+    output_dir: str,
+) -> None:
+    """绘制逐基站度排名柱状图。
+
+    比直方图直观得多：一眼看出谁是"社交达人"（枢纽节点）、
+    谁是"独行侠"（边缘节点），颜色按 cell_type 区分。
 
     Args:
         adj_matrix: 邻接矩阵。
+        cell_ids: 小区 ID 数组。
+        df: 原始数据，用于获取 cell_type。
         output_dir: 图片输出目录。
     """
     ensure_dir(output_dir)
 
-    # 计算每个节点的度（非对角线非零元素个数）
+    # 计算每个节点的度
     degrees = (adj_matrix > 0).sum(axis=1) - (np.diag(adj_matrix) > 0).astype(int)
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-    bins = np.arange(0, degrees.max() + 2) - 0.5
-    ax.hist(degrees, bins=bins, color="#5DADE2", edgecolor="#2C3E50", alpha=0.85)
+    # 获取 cell_type
+    cell_type_map = df.groupby("cell_id")["cell_type"].first().to_dict()
+    type_colors = {
+        "macro": "#E74C3C",
+        "micro": "#3498DB",
+        "pico":  "#2ECC71",
+    }
 
-    ax.set_xlabel("Degree", fontsize=11)
-    ax.set_ylabel("Number of Nodes", fontsize=11)
+    # 按度降序排列
+    order = np.argsort(degrees)[::-1]
+    sorted_ids = [cell_ids[i] for i in order]
+    sorted_degrees = degrees[order]
+    sorted_types = [cell_type_map.get(cid, "unknown") for cid in sorted_ids]
+    bar_colors = [type_colors.get(ct, "#999999") for ct in sorted_types]
+
+    fig, ax = plt.subplots(figsize=(14, 5))
+    bars = ax.bar(range(len(sorted_ids)), sorted_degrees, color=bar_colors, edgecolor="white")
+
+    # 数值标注
+    for bar, deg in zip(bars, sorted_degrees):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.3,
+                str(deg), ha="center", fontsize=9, fontweight="bold")
+
+    ax.axhline(y=degrees.mean(), color="gray", linestyle="--", linewidth=1.5,
+               label=f"Mean Degree = {degrees.mean():.1f}")
+
+    # 图例
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor="#E74C3C", label=f"macro ({sorted_types.count('macro')})"),
+        Patch(facecolor="#3498DB", label=f"micro ({sorted_types.count('micro')})"),
+        Patch(facecolor="#2ECC71", label=f"pico ({sorted_types.count('pico')})"),
+    ]
+    ax.legend(handles=legend_elements, fontsize=9)
+
+    # 简洁的 x 轴标签
+    short_labels = [cid.replace("CELL_", "") for cid in sorted_ids]
+    ax.set_xticks(range(len(sorted_ids)))
+    ax.set_xticklabels(short_labels, rotation=45, ha="right", fontsize=9)
+
+    ax.set_ylabel("Degree (Number of Neighbors)", fontsize=11)
     ax.set_title(
-        f"Node Degree Distribution\n"
+        f"Per-Node Degree Ranking  "
         f"(mean={degrees.mean():.1f}, min={degrees.min()}, max={degrees.max()})",
-        fontsize=12,
-        fontweight="bold",
+        fontsize=13, fontweight="bold",
     )
-    ax.set_xticks(range(0, int(degrees.max()) + 1))
+    ax.set_ylim(0, sorted_degrees[0] + 3)
+    ax.grid(True, alpha=0.2, axis="y")
 
     plt.tight_layout()
     path = os.path.join(output_dir, "degree_distribution.png")
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"  度分布图: {path}")
+    print(f"  度排名图: {path}")
 
 
 # ============================================================================
@@ -627,7 +715,7 @@ def main() -> None:
     print(f"\n[Step 8] 生成可视化")
     plot_correlation_heatmap(corr_matrix, cell_ids, FIGURES_DIR)
     plot_graph_topology(adj_matrix, cell_ids, df, FIGURES_DIR)
-    plot_degree_distribution(adj_matrix, FIGURES_DIR)
+    plot_degree_distribution(adj_matrix, cell_ids, df, FIGURES_DIR)
 
     print("\n" + "=" * 65)
     print("  图构建完成！")

@@ -132,25 +132,56 @@ def plot_predictions(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     cell_ids: list,
+    cell_type_map: dict,
     save_path: str,
     num_cells_to_plot: int = 8,
 ):
-    """Plot predicted vs true PRB utilization for a subset of cells."""
+    """Plot predicted vs true PRB utilization for a subset of cells.
+
+    Args:
+        y_true: (num_cells, num_windows) 真实值
+        y_pred: (num_cells, num_windows) 预测值
+        cell_ids: 小区 ID 列表
+        cell_type_map: {cell_id: cell_type} 字典，用于标题标注基站类型
+        save_path: 保存路径
+        num_cells_to_plot: 画几个子图
+    """
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
-    fig, axes = plt.subplots(4, 2, figsize=(16, 14))
-    axes = axes.flatten()
+    # 按 cell_type 顺序排：macro → micro → pico，同类内部按 RMSE 升序
+    type_order = {"macro": 0, "micro": 1, "pico": 2}
+    rmse_per_cell = np.sqrt(np.mean((y_true - y_pred) ** 2, axis=1))
+    sort_key = [(type_order.get(cell_type_map.get(cid, ""), 99), rmse_per_cell[i])
+                for i, cid in enumerate(cell_ids)]
+    plot_indices = np.argsort(sort_key)[:num_cells_to_plot]
 
-    for i in range(min(num_cells_to_plot, len(cell_ids))):
-        ax = axes[i]
+    n = min(num_cells_to_plot, len(cell_ids))
+    cols = min(4, n)
+    rows = (n + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(5*cols, 4*rows))
+    axes = axes.flatten() if n > 1 else [axes]
+
+    for idx, i in enumerate(plot_indices):
+        ax = axes[idx]
         t = np.arange(len(y_true[i]))
         ax.plot(t, y_true[i], "b-", linewidth=1.2, alpha=0.7, label="Ground Truth")
         ax.plot(t, y_pred[i], "r--", linewidth=1.2, alpha=0.7, label="Prediction")
-        ax.set_title(f"{cell_ids[i]}", fontsize=10, fontweight="bold")
+
+        cid = cell_ids[i]
+        ct = cell_type_map.get(cid, "?")
+        mse_val = np.mean((y_true[i] - y_pred[i]) ** 2)
+        ax.set_title(f"{cid} ({ct})  |  MSE={mse_val:.4f}", fontsize=10, fontweight="bold")
         ax.set_xlabel("Timestep")
-        ax.set_ylabel("PRB Utilization (normalized)")
-        ax.legend(fontsize=8)
+        ax.set_ylabel("PRB Util (norm)")
         ax.grid(True, alpha=0.3)
+
+    # 隐藏多余的子图
+    for j in range(n, len(axes)):
+        axes[j].set_visible(False)
+
+    # 只放一个共享图例
+    if n > 0:
+        axes[0].legend(fontsize=8)
 
     fig.suptitle("GCN+LSTM Congestion Prediction — Predictions vs Ground Truth (Test Set)",
                  fontsize=14, fontweight="bold")
@@ -180,16 +211,21 @@ def plot_error_distribution(y_true: np.ndarray, y_pred: np.ndarray, save_path: s
     axes[0].legend()
     axes[0].grid(True, alpha=0.3)
 
-    # Scatter: true vs predicted
-    axes[1].scatter(y_true.flatten(), y_pred.flatten(), alpha=0.3, s=5, color="steelblue")
+    # Right: hexbin density plot — 颜色越亮=点越密集，自然集中在 y=x 线附近
+    yt = y_true.flatten()
+    yp = y_pred.flatten()
+    ax2 = axes[1]
+    hb = ax2.hexbin(yt, yp, gridsize=50, cmap="YlOrRd", mincnt=1)
+    plt.colorbar(hb, ax=ax2, label="Count")
+
     lims = [0, 1]
-    axes[1].plot(lims, lims, "r--", linewidth=1.5, label="y=x (Perfect)")
-    axes[1].set_xlabel("Ground Truth")
-    axes[1].set_ylabel("Prediction")
-    axes[1].set_title(f"Prediction vs Ground Truth "
-                      f"(R²={np.corrcoef(y_true.flatten(), y_pred.flatten())[0,1]**2:.4f})")
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
+    ax2.plot(lims, lims, "b--", linewidth=1.8, label="y=x (Perfect)")
+    ax2.set_xlabel("Ground Truth")
+    ax2.set_ylabel("Prediction")
+    r2 = np.corrcoef(yt, yp)[0, 1] ** 2
+    ax2.set_title(f"Prediction vs Ground Truth  (R²={r2:.4f})")
+    ax2.legend(fontsize=9)
+    ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
     fig.savefig(save_path, dpi=150, bbox_inches="tight")
@@ -197,23 +233,62 @@ def plot_error_distribution(y_true: np.ndarray, y_pred: np.ndarray, save_path: s
     print(f"  Error distribution plot: {save_path}")
 
 
-def plot_per_node_metrics(metrics_per_node: dict, cell_ids: list, save_path: str):
-    """Plot per-cell RMSE bar chart."""
+def plot_per_node_metrics(
+    metrics_per_node: dict,
+    cell_ids: list,
+    cell_type_map: dict,
+    save_path: str,
+):
+    """Plot per-cell RMSE bar chart, colored by cell_type.
+
+    Args:
+        metrics_per_node: {cell_id: {"RMSE": float, ...}}
+        cell_ids: 小区 ID 列表
+        cell_type_map: {cell_id: cell_type} 字典
+        save_path: 保存路径
+    """
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
-    rmse_values = [metrics_per_node[cid]["RMSE"] for cid in cell_ids]
-    colors = ["#2196F3" if v < np.median(rmse_values) else "#FF5722" for v in rmse_values]
+    # 按 cell_type 排序再按 RMSE 排序
+    type_order = {"macro": 0, "micro": 1, "pico": 2}
+    rmse_values = np.array([metrics_per_node[cid]["RMSE"] for cid in cell_ids])
+    types = [cell_type_map.get(cid, "unknown") for cid in cell_ids]
+    sort_key = [(type_order.get(t, 99), rmse_values[i]) for i, t in enumerate(types)]
+    order = np.argsort(sort_key)
+    sorted_ids = [cell_ids[i] for i in order]
+    sorted_rmse = rmse_values[order]
+    sorted_types = [types[i] for i in order]
 
-    fig, ax = plt.subplots(figsize=(14, 6))
-    bars = ax.bar(range(len(cell_ids)), rmse_values, color=colors, edgecolor="white")
-    ax.axhline(np.mean(rmse_values), color="green", linestyle="--", linewidth=1.5,
-               label=f"Mean RMSE={np.mean(rmse_values):.4f}")
-    ax.set_xticks(range(len(cell_ids)))
-    ax.set_xticklabels(cell_ids, rotation=45, ha="right", fontsize=7)
-    ax.set_ylabel("RMSE")
-    ax.set_title("Per-Cell PRB Utilization Prediction RMSE")
-    ax.legend()
-    ax.grid(True, alpha=0.3, axis="y")
+    type_colors = {"macro": "#E74C3C", "micro": "#3498DB", "pico": "#2ECC71"}
+    bar_colors = [type_colors.get(ct, "#999999") for ct in sorted_types]
+
+    fig, ax = plt.subplots(figsize=(14, 5.5))
+    bars = ax.bar(range(len(sorted_ids)), sorted_rmse, color=bar_colors, edgecolor="white")
+
+    mean_rmse = np.mean(sorted_rmse)
+    ax.axhline(mean_rmse, color="gray", linestyle="--", linewidth=1.5,
+               label=f"Mean RMSE = {mean_rmse:.4f}")
+
+    # 图例
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor="#E74C3C", label=f"macro ({sorted_types.count('macro')})"),
+        Patch(facecolor="#3498DB", label=f"micro ({sorted_types.count('micro')})"),
+        Patch(facecolor="#2ECC71", label=f"pico ({sorted_types.count('pico')})"),
+    ]
+    ax.legend(handles=legend_elements, fontsize=9, loc="upper left")
+
+    short_labels = [cid.replace("CELL_", "") for cid in sorted_ids]
+    ax.set_xticks(range(len(sorted_ids)))
+    ax.set_xticklabels(short_labels, rotation=45, ha="right", fontsize=9)
+    ax.set_ylabel("RMSE", fontsize=11)
+    ax.set_title(
+        f"Per-Cell PRB Utilization Prediction RMSE  "
+        f"(mean={mean_rmse:.4f}, best={sorted_rmse[0]:.4f}, worst={sorted_rmse[-1]:.4f})",
+        fontsize=13, fontweight="bold",
+    )
+    ax.grid(True, alpha=0.2, axis="y")
+    ax.set_ylim(0, sorted_rmse[-1] * 1.25)
 
     plt.tight_layout()
     fig.savefig(save_path, dpi=150, bbox_inches="tight")
@@ -236,6 +311,9 @@ def evaluate():
     df = df.sort_values(["cell_id", "timestamp"]).reset_index(drop=True)
     cell_ids = sorted(df["cell_id"].unique())
     num_cells = len(cell_ids)
+
+    # ---- 获取每个基站的 cell_type（用于可视化标注） ----
+    cell_type_map = df.groupby("cell_id")["cell_type"].first().to_dict()
 
     ts_per_cell = df.groupby("cell_id").size()
     min_ts = int(ts_per_cell.min())
@@ -342,7 +420,7 @@ def evaluate():
     # ---- Visualization ----
     print(f"\n{'='*60}\nGenerating Visualizations\n{'='*60}")
     plot_predictions(
-        y_true, y_pred, cell_ids,
+        y_true, y_pred, cell_ids, cell_type_map,
         os.path.join(cfg.figure_dir, "gcn_lstm_predictions.png"),
     )
     plot_error_distribution(
@@ -350,7 +428,7 @@ def evaluate():
         os.path.join(cfg.figure_dir, "gcn_lstm_error_dist.png"),
     )
     plot_per_node_metrics(
-        metrics_per_node, cell_ids,
+        metrics_per_node, cell_ids, cell_type_map,
         os.path.join(cfg.figure_dir, "gcn_lstm_per_node_rmse.png"),
     )
 

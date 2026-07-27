@@ -147,64 +147,62 @@ def _generate_random_graph(num_nodes: int, avg_degree: int = 4):
 def plot_offloading_comparison(
     load_before: np.ndarray,
     load_after: np.ndarray,
-    congested_before: np.ndarray,
-    congested_after: np.ndarray,
     cell_ids: np.ndarray,
     strategy_name: str,
     save_path: str,
 ):
-    """绘制卸载前后负载对比图。"""
+    """绘制卸载前后负载对比图（只保留负载分布，去掉拥塞状态矩阵）。
+
+    Args:
+        load_before: 卸载前负载数组
+        load_after: 卸载后负载数组
+        cell_ids: 小区 ID
+        strategy_name: 策略名称
+        save_path: 保存路径
+    """
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
     n = len(load_before)
     x = np.arange(n)
 
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    # 按卸载前负载降序排列，只看有变化的
+    delta = np.abs(load_before - load_after)
+    changed = delta > 0.001
+    order = np.argsort(load_before * changed.astype(float))[::-1]
+    # 取前 15 个（有变化的优先）
+    top_n = min(15, n)
+    plot_idx = order[:top_n]
 
-    # 子图 1: 负载分布对比
-    ax = axes[0]
+    fig, ax = plt.subplots(figsize=(14, 5.5))
+
+    xi = np.arange(top_n)
     width = 0.35
-    bars1 = ax.bar(x - width/2, load_before, width, label="Before Offloading",
-                   color="#FF5722", alpha=0.8, edgecolor="white")
-    bars2 = ax.bar(x + width/2, load_after, width, label="After Offloading",
-                   color="#4CAF50", alpha=0.8, edgecolor="white")
-    ax.axhline(y=np.mean(load_before), color="red", linestyle="--", linewidth=1,
+    before_vals = load_before[plot_idx]
+    after_vals = load_after[plot_idx]
+    labels = [cell_ids[i].replace("CELL_", "") for i in plot_idx]
+
+    bars1 = ax.bar(xi - width/2, before_vals, width, label="Before Offloading",
+                   color="#FF5722", alpha=0.85, edgecolor="white")
+    bars2 = ax.bar(xi + width/2, after_vals, width, label="After Offloading",
+                   color="#4CAF50", alpha=0.85, edgecolor="white")
+
+    # 标注变化量
+    for i, (b, a) in enumerate(zip(before_vals, after_vals)):
+        if abs(b - a) > 0.005:
+            ax.annotate(f"-{b-a:.2f}", (xi[i], max(b, a) + 0.02),
+                       ha="center", fontsize=8, color="#4CAF50", fontweight="bold")
+
+    ax.axhline(y=np.mean(load_before), color="red", linestyle="--", linewidth=1.5,
                alpha=0.7, label=f"Mean Before={np.mean(load_before):.3f}")
-    ax.axhline(y=np.mean(load_after), color="green", linestyle="--", linewidth=1,
+    ax.axhline(y=np.mean(load_after), color="green", linestyle="--", linewidth=1.5,
                alpha=0.7, label=f"Mean After={np.mean(load_after):.3f}")
-    ax.set_xticks(x)
-    ax.set_xticklabels(cell_ids, rotation=45, ha="right", fontsize=7)
-    ax.set_ylabel("PRB Utilization (normalized)")
-    ax.set_title(f"Load Distribution — {strategy_name}")
-    ax.legend(fontsize=8)
+    ax.set_xticks(xi)
+    ax.set_xticklabels(labels, fontsize=9)
+    ax.set_ylabel("PRB Utilization (normalized)", fontsize=11)
+    ax.set_title(f"Load Distribution Before vs After Offloading — {strategy_name}",
+                 fontsize=13, fontweight="bold")
+    ax.legend(fontsize=9, loc="upper right")
     ax.grid(True, alpha=0.2, axis="y")
-
-    # 子图 2: 拥塞状态变化
-    ax2 = axes[1]
-    before_status = ["Congested" if c else "Normal" for c in congested_before]
-    after_status = ["Congested" if c else "Normal" for c in congested_after]
-    status_colors = {"Normal": "#4CAF50", "Congested": "#FF5722"}
-
-    for i, cid in enumerate(cell_ids):
-        color_before = status_colors[before_status[i]]
-        color_after = status_colors[after_status[i]]
-        ax2.scatter(i, 1, c=color_before, s=80, marker="s", edgecolors="white", linewidth=0.5)
-        ax2.scatter(i, 0, c=color_after, s=80, marker="s", edgecolors="white", linewidth=0.5)
-
-    ax2.set_yticks([0, 1])
-    ax2.set_yticklabels(["After", "Before"])
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(cell_ids, rotation=45, ha="right", fontsize=7)
-    ax2.set_title("Congestion Status Change")
-    ax2.set_xlim(-0.5, n - 0.5)
-
-    # 添加图例
-    from matplotlib.patches import Patch
-    legend_elements = [
-        Patch(facecolor="#FF5722", label="Congested"),
-        Patch(facecolor="#4CAF50", label="Normal"),
-    ]
-    ax2.legend(handles=legend_elements, fontsize=8)
 
     fig.suptitle("Task Offloading Optimization — Before vs After",
                  fontsize=14, fontweight="bold")
@@ -267,36 +265,42 @@ def plot_scheduling_timeline(
     result: SchedulingResult,
     save_path: str,
 ):
-    """绘制调度时间线图。"""
+    """绘制调度时间线图（只保留任务到达与完成，去掉无变化的队列长度）。"""
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
     timeline = result.timeline
     timesteps = [t["timestep"] for t in timeline]
-    pending = [t["pending_count"] for t in timeline]
     completed = [t["completed_this_step"] for t in timeline]
     new_tasks = [t["new_tasks"] for t in timeline]
+    pending = [t["pending_count"] for t in timeline]
 
-    fig, axes = plt.subplots(2, 1, figsize=(14, 8))
+    fig, ax = plt.subplots(figsize=(14, 5))
 
-    ax = axes[0]
-    ax.plot(timesteps, pending, "r-", linewidth=1.5, label="Pending Queue")
-    ax.fill_between(timesteps, 0, pending, alpha=0.15, color="red")
-    ax.set_ylabel("Pending Tasks")
-    ax.set_title("Task Queue Length Over Time")
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
+    x = np.arange(len(timesteps))
+    width = 0.35
+    ax.bar(x - width/2, new_tasks, width, alpha=0.85, color="#2196F3",
+           label="New Tasks", edgecolor="white")
+    ax.bar(x + width/2, completed, width, alpha=0.85, color="#4CAF50",
+           label="Completed", edgecolor="white")
 
-    ax2 = axes[1]
-    ax2.bar(timesteps, new_tasks, alpha=0.6, color="#2196F3", label="New Tasks", edgecolor="white")
-    ax2.bar(timesteps, completed, alpha=0.8, color="#4CAF50", label="Completed", edgecolor="white")
-    ax2.set_xlabel("Timestep")
-    ax2.set_ylabel("Tasks")
-    ax2.set_title("Task Arrival & Completion")
-    ax2.legend(fontsize=9)
-    ax2.grid(True, alpha=0.3, axis="y")
+    ax.set_xticks(x)
+    ax.set_xticklabels(timesteps, fontsize=8)
+    ax.set_xlabel("Timestep", fontsize=11)
+    ax.set_ylabel("Tasks", fontsize=11)
+    ax.set_title("Task Arrival & Completion per Timestep", fontsize=12, fontweight="bold")
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.2, axis="y")
 
-    fig.suptitle(f"Scheduling Timeline ({result.completed_tasks}/{result.total_tasks} completed, "
-                 f"{result.offloaded_tasks} offloaded)",
+    # 左上角放统计摘要
+    peak_queue = max(pending)
+    ax.text(0.02, 0.97,
+            f"Total: {result.total_tasks}  |  Completed: {result.completed_tasks}  |  "
+            f"Offloaded: {result.offloaded_tasks}  |  Max Queue: {peak_queue}",
+            transform=ax.transAxes, fontsize=10, verticalalignment="top",
+            bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5))
+
+    fig.suptitle(f"Scheduling Timeline — {result.completed_tasks}/{result.total_tasks} completed, "
+                 f"{result.offloaded_tasks} offloaded",
                  fontsize=13, fontweight="bold")
     plt.tight_layout()
     fig.savefig(save_path, dpi=150, bbox_inches="tight")
@@ -411,7 +415,6 @@ def run_pipeline(strategy_name: str = "hybrid", timesteps: int = 30, verbose: bo
     # 可视化
     plot_offloading_comparison(
         result.load_before, result.load_after,
-        result.congested_before, result.congested_after,
         cell_ids, strategy_name,
         os.path.join(cfg.figure_dir, f"offloading_{strategy_name}_comparison.png"),
     )
