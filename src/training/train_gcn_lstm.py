@@ -78,7 +78,7 @@ class Config:
     grad_clip = 1.0
 
     # ---- 设备 ----
-    device = "cpu"  # 当前环境 CUDA scatter 内核有兼容性故障，用 CPU 跑，20 节点图完全够
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 cfg = Config()
