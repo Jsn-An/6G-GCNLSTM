@@ -386,7 +386,7 @@ If Predicted_Load[i] > 70%:
 ---
 
 <div align="center">
-<p><b>HKU Graduate Project · 2026</b></p>
+<p><b>HKU Summer Project · 2026</b></p>
 <p>For questions, please open an Issue or contact the project author.</p>
 </div>
 

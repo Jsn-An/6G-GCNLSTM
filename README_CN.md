@@ -386,6 +386,6 @@ python scripts/run_offloading.py --timesteps 50     # 自定义仿真步数
 ---
 
 <div align="center">
-<p><b>HKU Graduate Project · 2026</b></p>
+<p><b>HKU Summer Project · 2026</b></p>
 <p>如有问题，请提交 Issue 或联系项目作者。</p>
 </div>
